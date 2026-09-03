@@ -2,8 +2,10 @@ import os
 import time
 import json
 import hashlib
+import threading
 import requests
 from bs4 import BeautifulSoup
+from flask import Flask
 
 # ---------- تنظیمات (از Environment Variables خوانده می‌شود) ----------
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
@@ -223,6 +225,15 @@ def main_loop():
         time.sleep(CHECK_INTERVAL_SECONDS)
 
 
+# ---------- یک وب‌سرور خیلی ساده، فقط برای اینکه Render این را «سرویس وب» بشناسد ----------
+app = Flask(__name__)
+
+
+@app.route("/")
+def health_check():
+    return "PharmaCity bot is running."
+
+
 if __name__ == "__main__":
     missing = [
         name for name, val in [
@@ -234,4 +245,9 @@ if __name__ == "__main__":
     if missing:
         print(f"[ERROR] این متغیرها تنظیم نشده‌اند: {missing}")
     else:
-        main_loop()
+        # حلقه اصلی ربات را در یک ترد جدا اجرا می‌کنیم تا وب‌سرور هم‌زمان کار کند
+        bot_thread = threading.Thread(target=main_loop, daemon=True)
+        bot_thread.start()
+
+    port = int(os.environ.get("PORT", "10000"))
+    app.run(host="0.0.0.0", port=port)
