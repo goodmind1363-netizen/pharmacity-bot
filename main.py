@@ -24,6 +24,11 @@ WHO_CHECK_HOUR = int(os.environ.get("WHO_CHECK_HOUR", "9"))  # ساعت چک ر�
 SEEN_FILE = "seen_posts.json"
 WHO_NEWS_URL = "https://www.who.int/news"
 
+# اگر سرور داخل ایران است و به فیلترشکن نیاز دارد، آدرس پراکسی محلی را
+# اینجا تنظیم کنید (مثلا یک سرویس V2Ray/Xray که روی خود سرور اجرا می‌شود)
+PROXY_URL = os.environ.get("PROXY_URL", "")  # مثال: socks5h://127.0.0.1:1080
+PROXIES = {"http": PROXY_URL, "https": PROXY_URL} if PROXY_URL else None
+
 # ---------- کمکی: خواندن/نوشتن پیام‌های قبلاً دیده‌شده (جلوگیری از تکرار) ----------
 def load_seen():
     if os.path.exists(SEEN_FILE):
@@ -51,7 +56,7 @@ def fetch_channel_posts(channel_username, limit=5):
     try:
         resp = requests.get(url, timeout=15, headers={
             "User-Agent": "Mozilla/5.0"
-        })
+        }, proxies=PROXIES)
         resp.raise_for_status()
     except Exception as e:
         print(f"[WARN] خطا در دریافت کانال {channel_username}: {e}")
@@ -132,6 +137,7 @@ def rewrite_news(raw_text, is_scientific=False):
             headers={"Content-Type": "application/json"},
             json={"contents": [{"parts": [{"text": prompt}]}]},
             timeout=60,
+            proxies=PROXIES,
         )
         resp.raise_for_status()
         data = resp.json()
@@ -149,7 +155,7 @@ def send_to_channel(text):
             "chat_id": CHANNEL_USERNAME,
             "text": text,
             "parse_mode": "HTML",
-        }, timeout=15)
+        }, timeout=15, proxies=PROXIES)
         resp.raise_for_status()
         result = resp.json()
         if not result.get("ok"):
