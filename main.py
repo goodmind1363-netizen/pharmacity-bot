@@ -139,7 +139,9 @@ def rewrite_news(raw_text, is_scientific=False):
             timeout=60,
             proxies=PROXIES,
         )
-        resp.raise_for_status()
+        if not resp.ok:
+            print(f"[WARN] خطا در بازنویسی با AI: HTTP {resp.status_code} - {resp.text[:500]}")
+            return None
         data = resp.json()
         return data["candidates"][0]["content"]["parts"][0]["text"].strip()
     except Exception as e:
