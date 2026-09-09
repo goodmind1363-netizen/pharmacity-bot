@@ -62,13 +62,39 @@ def fetch_channel_posts(channel_username, limit=5):
         print(f"[WARN] خطا در دریافت کانال {channel_username}: {e}")
         return []
 
+# ---------- گرفتن آخرین پیام‌های یک کانال از نسخه وب عمومی تلگرام (متن + عکس) ----------
+def fetch_channel_posts(channel_username, limit=5):
+    url = f"https://t.me/s/{channel_username}"
+    try:
+        resp = requests.get(url, timeout=15, headers={
+            "User-Agent": "Mozilla/5.0"
+        }, proxies=PROXIES)
+        resp.raise_for_status()
+    except Exception as e:
+        print(f"[WARN] خطا در دریافت کانال {channel_username}: {e}")
+        return []
+
     soup = BeautifulSoup(resp.text, "html.parser")
-    messages = soup.select("div.tgme_widget_message_text")
+    message_blocks = soup.select("div.tgme_widget_message")
     posts = []
-    for m in messages[-limit:]:
-        text = m.get_text(separator="\n").strip()
-        if text:
-            posts.append(text)
+    for block in message_blocks[-limit:]:
+        text_div = block.select_one("div.tgme_widget_message_text")
+        text = text_div.get_text(separator="\n").strip() if text_div else ""
+        if not text:
+            continue  # پیام‌های بدون متن (فقط عکس بدون توضیح) را رد می‌کنیم
+
+        photo_url = None
+        photo_div = block.select_one("a.tgme_widget_message_photo_wrap")
+        if photo_div and photo_div.get("style"):
+            style = photo_div["style"]
+            match_start = style.find("url('")
+            if match_start != -1:
+                match_start += len("url('")
+                match_end = style.find("')", match_start)
+                if match_end != -1:
+                    photo_url = style[match_start:match_end]
+
+        posts.append({"text": text, "photo_url": photo_url})
     return posts
 
 
@@ -95,17 +121,27 @@ def fetch_who_latest(limit=2):
             continue
         full_url = href if href.startswith("http") else f"https://www.who.int{href}"
 
+        photo_url = None
         try:
             article_resp = requests.get(full_url, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
             article_resp.raise_for_status()
             article_soup = BeautifulSoup(article_resp.text, "html.parser")
             paragraphs = article_soup.select("p")
             body = "\n".join(p.get_text(strip=True) for p in paragraphs[:6] if p.get_text(strip=True))
+
+            og_image = article_soup.select_one("meta[property='og:image']")
+            if og_image and og_image.get("content"):
+                photo_url = og_image["content"]
         except Exception as e:
             print(f"[WARN] خطا در دریافت متن کامل خبر WHO: {e}")
             body = ""
 
-        articles.append({"url": full_url, "title": title, "text": f"{title}\n\n{body}"})
+        articles.append({
+            "url": full_url,
+            "title": title,
+            "text": f"{title}\n\n{body}",
+            "photo_url": photo_url,
+        })
 
     return articles
 
@@ -125,6 +161,8 @@ def rewrite_news(raw_text, is_scientific=False):
         "3) بدنه خبر در ۲ تا ۴ پاراگراف کوتاه، بدون تکرار، خلاصه اما کامل\n"
         "4) یک خط خالی\n"
         "5) یک جمع‌بندی/نتیجه‌گیری کوتاه با پیشوند «🔎 نتیجه‌گیری:»\n"
+        "نکته مهم: هیچ نام کانال، یوزرنیم (مثل @something)، لینک تلگرام، یا عبارت "
+        "«Forwarded from» یا مشابه آن را از متن اصلی در خروجی نیاور — فقط خودِ محتوای خبر را بازنویسی کن.\n"
         "فقط خروجی نهایی را بنویس، بدون هیچ مقدمه یا توضیح اضافه:\n\n" + raw_text
     )
     url = (
@@ -149,15 +187,28 @@ def rewrite_news(raw_text, is_scientific=False):
         return None
 
 
-# ---------- ارسال پیام به کانال خودمان ----------
-def send_to_channel(text):
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-    try:
-        resp = requests.post(url, data={
+# ---------- ارسال پیام به کانال خودمان (با عکس اختیاری) ----------
+def send_to_channel(text, photo_url=None):
+    if photo_url:
+        url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto"
+        # کپشن عکس در تلگرام حداکثر 1024 کاراکتر است
+        caption = text if len(text) <= 1024 else text[:1021] + "..."
+        payload = {
+            "chat_id": CHANNEL_USERNAME,
+            "photo": photo_url,
+            "caption": caption,
+            "parse_mode": "HTML",
+        }
+    else:
+        url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+        payload = {
             "chat_id": CHANNEL_USERNAME,
             "text": text,
             "parse_mode": "HTML",
-        }, timeout=15, proxies=PROXIES)
+        }
+
+    try:
+        resp = requests.post(url, data=payload, timeout=15, proxies=PROXIES)
         resp.raise_for_status()
         result = resp.json()
         if not result.get("ok"):
@@ -165,6 +216,10 @@ def send_to_channel(text):
         return result.get("ok", False)
     except Exception as e:
         print(f"[WARN] خطا در ارسال به کانال: {e}")
+        # اگر ارسال عکس شکست خورد (مثلا لینک عکس نامعتبر)، به‌صورت متن ساده امتحان کن
+        if photo_url:
+            print("[INFO] تلاش دوباره بدون عکس...")
+            return send_to_channel(text, photo_url=None)
         return False
 
 
@@ -197,7 +252,9 @@ def main_loop():
         # ۱) چک کانال‌های تلگرام (هر بار)
         for channel in SOURCE_CHANNELS:
             posts = fetch_channel_posts(channel)
-            for text in posts:
+            for post in posts:
+                text = post["text"]
+                photo_url = post["photo_url"]
                 h = post_hash(channel, text)
                 if h in seen:
                     continue
@@ -212,7 +269,7 @@ def main_loop():
                     f"━━━━━━━━━━\n"
                     f"🔗 {CHANNEL_USERNAME if CHANNEL_USERNAME.startswith('@') else '@' + CHANNEL_USERNAME}"
                 )
-                ok = send_to_channel(final_text)
+                ok = send_to_channel(final_text, photo_url=photo_url)
                 if ok:
                     print(f"[INFO] خبر با موفقیت در کانال پست شد.")
                     new_seen.add(h)
@@ -237,7 +294,7 @@ def main_loop():
                     f"🌍 منبع: WHO\n"
                     f"🔗 {CHANNEL_USERNAME if CHANNEL_USERNAME.startswith('@') else '@' + CHANNEL_USERNAME}"
                 )
-                ok = send_to_channel(final_text)
+                ok = send_to_channel(final_text, photo_url=who_article.get("photo_url"))
                 if ok:
                     print("[INFO] مطلب WHO با موفقیت پست شد.")
                     new_seen.add(h)
