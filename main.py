@@ -166,11 +166,28 @@ def send_to_channel(text):
         return False
 
 
+# ---------- بررسی مدل‌های مجاز برای این کلید (فقط برای عیب‌یابی) ----------
+def print_available_models():
+    try:
+        resp = requests.get(
+            f"https://generativelanguage.googleapis.com/v1beta/models?key={GEMINI_API_KEY}",
+            timeout=15,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        names = [m.get("name", "") for m in data.get("models", [])
+                 if "generateContent" in m.get("supportedGenerationMethods", [])]
+        print(f"[INFO] مدل‌های مجاز برای این کلید: {names}")
+    except Exception as e:
+        print(f"[WARN] خطا در گرفتن لیست مدل‌ها: {e}")
+
+
 # ---------- حلقه اصلی ----------
 def main_loop():
     seen = load_seen()
     last_who_check_date = None
     print(f"شروع به کار ربات. کانال‌های منبع: {SOURCE_CHANNELS}")
+    print_available_models()
 
     while True:
         new_seen = set(seen)
