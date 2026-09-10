@@ -149,7 +149,9 @@ def fetch_who_latest(limit=2):
 # ---------- بازنویسی خبر با هوش مصنوعی (از طریق API رسمی Google Gemini) ----------
 def rewrite_news(raw_text, is_scientific=False):
     style_note = (
-        "این یک مطلب علمی/پزشکی از سازمان جهانی بهداشت (WHO) است."
+        "این یک مطلب علمی/پزشکی از سازمان جهانی بهداشت (WHO) است که به زبان انگلیسی است. "
+        "آن را کامل و دقیق به فارسی روان ترجمه کن (نه فقط خلاصه‌برداری سطحی)، طوری که خواننده "
+        "فارسی‌زبان بدون نیاز به منبع اصلی، محتوای علمی را کامل و درست متوجه شود."
         if is_scientific else
         "این یک خبر داروسازی/سلامت است."
     )
@@ -291,7 +293,7 @@ def main_loop():
                 final_text = (
                     f"{rewritten}\n\n"
                     f"━━━━━━━━━━\n"
-                    f"🌍 منبع: WHO\n"
+                    f"🌍 منبع: {who_article['url']}\n"
                     f"🔗 {CHANNEL_USERNAME if CHANNEL_USERNAME.startswith('@') else '@' + CHANNEL_USERNAME}"
                 )
                 ok = send_to_channel(final_text, photo_url=who_article.get("photo_url"))
