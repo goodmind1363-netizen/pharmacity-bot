@@ -20,9 +20,16 @@ SOURCE_CHANNELS = [
 ]
 
 CHECK_INTERVAL_SECONDS = int(os.environ.get("CHECK_INTERVAL_SECONDS", "900"))  # 15 دقیقه
-WHO_CHECK_HOUR = int(os.environ.get("WHO_CHECK_HOUR", "9"))  # ساعت چک روزانه WHO (به وقت سرور، معمولا UTC)
-SEEN_FILE = "seen_posts.json"
+# ساعت:دقیقه‌های چک WHO در روز (به وقت UTC)، جدا شده با کاما — پیش‌فرض ۳ بار در روز
+WHO_CHECK_TIMES = [
+    t.strip() for t in os.environ.get("WHO_CHECK_TIMES", "05:30,11:00,16:20").split(",") if t.strip()
+]
 WHO_NEWS_URL = "https://www.who.int/news"
+
+# اطلاعات JSONBin.io برای ذخیره‌سازی دائمی «خبرهای دیده‌شده»
+# (چون دیسک Render رایگان با هر ری‌استارت پاک می‌شود)
+JSONBIN_API_KEY = os.environ.get("JSONBIN_API_KEY", "")
+JSONBIN_BIN_ID = os.environ.get("JSONBIN_BIN_ID", "")
 
 # اگر سرور داخل ایران است و به فیلترشکن نیاز دارد، آدرس پراکسی محلی را
 # اینجا تنظیم کنید (مثلا یک سرویس V2Ray/Xray که روی خود سرور اجرا می‌شود)
@@ -30,19 +37,46 @@ PROXY_URL = os.environ.get("PROXY_URL", "")  # مثال: socks5h://127.0.0.1:108
 PROXIES = {"http": PROXY_URL, "https": PROXY_URL} if PROXY_URL else None
 
 # ---------- کمکی: خواندن/نوشتن پیام‌های قبلاً دیده‌شده (جلوگیری از تکرار) ----------
+# این‌ها را روی JSONBin.io (سرویس رایگان ذخیره‌سازی JSON) نگه می‌داریم تا با
+# ری‌استارت یا دیپلوی جدید Render پاک نشوند.
 def load_seen():
-    if os.path.exists(SEEN_FILE):
-        try:
-            with open(SEEN_FILE, "r", encoding="utf-8") as f:
-                return set(json.load(f))
-        except Exception:
-            return set()
-    return set()
+    if not JSONBIN_API_KEY or not JSONBIN_BIN_ID:
+        print("[WARN] JSONBIN تنظیم نشده — حافظه ضدتکرار موقتی و ناپایدار خواهد بود.")
+        return set()
+    try:
+        resp = requests.get(
+            f"https://api.jsonbin.io/v3/b/{JSONBIN_BIN_ID}/latest",
+            headers={"X-Master-Key": JSONBIN_API_KEY},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        return set(data.get("record", {}).get("seen", []))
+    except Exception as e:
+        print(f"[WARN] خطا در خواندن حافظه ضدتکرار از JSONBin: {e}")
+        return set()
 
 
 def save_seen(seen):
-    with open(SEEN_FILE, "w", encoding="utf-8") as f:
-        json.dump(list(seen), f, ensure_ascii=False)
+    if not JSONBIN_API_KEY or not JSONBIN_BIN_ID:
+        return
+    try:
+        # فقط 500 مورد آخر را نگه می‌داریم تا حجم داده بیش از حد بزرگ نشود
+        trimmed = list(seen)[-500:]
+        resp = requests.put(
+            f"https://api.jsonbin.io/v3/b/{JSONBIN_BIN_ID}",
+            headers={
+                "X-Master-Key": JSONBIN_API_KEY,
+                "Content-Type": "application/json",
+            },
+            json={"seen": trimmed},
+            timeout=15,
+        )
+        resp.raise_for_status()
+    except Exception as e:
+        print(f"[WARN] خطا در ذخیره حافظه ضدتکرار در JSONBin: {e}")
+
+
 
 
 def post_hash(channel, text):
@@ -244,7 +278,7 @@ def print_available_models():
 # ---------- حلقه اصلی ----------
 def main_loop():
     seen = load_seen()
-    last_who_check_date = None
+    last_who_check_key = None
     print(f"شروع به کار ربات. کانال‌های منبع: {SOURCE_CHANNELS}")
     print_available_models()
 
@@ -277,10 +311,22 @@ def main_loop():
                     new_seen.add(h)
                 time.sleep(3)
 
-        # ۲) چک روزانه WHO (فقط یک بار در روز، در ساعت مشخص‌شده)
+        # ۲) چک WHO (چند بار در روز، در ساعت:دقیقه‌های مشخص‌شده، با کمی انعطاف)
         now = time.gmtime()
         today_str = time.strftime("%Y-%m-%d", now)
-        if now.tm_hour == WHO_CHECK_HOUR and last_who_check_date != today_str:
+        now_minutes = now.tm_hour * 60 + now.tm_min
+        tolerance_minutes = max(CHECK_INTERVAL_SECONDS // 60, 15)
+
+        matched_time = None
+        for t in WHO_CHECK_TIMES:
+            th, tm = map(int, t.split(":"))
+            target_minutes = th * 60 + tm
+            if abs(now_minutes - target_minutes) <= tolerance_minutes // 2:
+                matched_time = t
+                break
+
+        check_key = f"{today_str}-{matched_time}"
+        if matched_time and last_who_check_key != check_key:
             who_articles = fetch_who_latest(limit=2)
             for who_article in who_articles:
                 h = post_hash("who.int", who_article["text"])
@@ -301,7 +347,7 @@ def main_loop():
                     print("[INFO] مطلب WHO با موفقیت پست شد.")
                     new_seen.add(h)
                 time.sleep(3)
-            last_who_check_date = today_str
+            last_who_check_key = check_key
 
         seen = new_seen
         save_seen(seen)
