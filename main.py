@@ -22,7 +22,7 @@ SOURCE_CHANNELS = [
 CHECK_INTERVAL_SECONDS = int(os.environ.get("CHECK_INTERVAL_SECONDS", "900"))  # 15 دقیقه
 # ساعت:دقیقه‌های چک WHO در روز (به وقت UTC)، جدا شده با کاما — پیش‌فرض ۳ بار در روز
 WHO_CHECK_TIMES = [
-    t.strip() for t in os.environ.get("WHO_CHECK_TIMES", "05:30,11:00,16:20,19:30").split(",") if t.strip()
+    t.strip() for t in os.environ.get("WHO_CHECK_TIMES", "04:30,07:00,11:30,15:30").split(",") if t.strip()
 ]
 WHO_NEWS_URL = "https://www.who.int/news"
 
@@ -225,40 +225,58 @@ def rewrite_news(raw_text, is_scientific=False):
 
 # ---------- ارسال پیام به کانال خودمان (با عکس اختیاری) ----------
 def send_to_channel(text, photo_url=None):
-    if photo_url:
-        url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto"
-        # کپشن عکس در تلگرام حداکثر 1024 کاراکتر است
-        caption = text if len(text) <= 1024 else text[:1021] + "..."
-        payload = {
-            "chat_id": CHANNEL_USERNAME,
-            "photo": photo_url,
-            "caption": caption,
-            "parse_mode": "HTML",
-        }
-    else:
-        url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-        payload = {
-            "chat_id": CHANNEL_USERNAME,
-            "text": text,
-            "parse_mode": "HTML",
-        }
+    caption_or_text = text if len(text) <= 1024 else text[:1021] + "..."
 
+    if photo_url:
+        # عکس را خودمان دانلود می‌کنیم و مستقیم آپلود می‌کنیم، چون بعضی
+        # سایت‌ها اجازه دانلود مستقیم توسط سرور تلگرام را نمی‌دهند (Hotlink Protection)
+        try:
+            img_resp = requests.get(
+                photo_url, timeout=20,
+                headers={"User-Agent": "Mozilla/5.0"},
+                proxies=PROXIES,
+            )
+            img_resp.raise_for_status()
+            image_bytes = img_resp.content
+        except Exception as e:
+            print(f"[WARN] خطا در دانلود عکس ({photo_url}): {e}")
+            return send_to_channel(text, photo_url=None)
+
+        url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto"
+        data = {
+            "chat_id": CHANNEL_USERNAME,
+            "caption": caption_or_text,
+            "parse_mode": "HTML",
+        }
+        files = {"photo": ("image.jpg", image_bytes)}
+        try:
+            resp = requests.post(url, data=data, files=files, timeout=30, proxies=PROXIES)
+            if not resp.ok:
+                print(f"[WARN] تلگرام خطا داد: HTTP {resp.status_code} - {resp.text[:500]}")
+                print("[INFO] تلاش دوباره بدون عکس...")
+                return send_to_channel(text, photo_url=None)
+            result = resp.json()
+            return result.get("ok", False)
+        except Exception as e:
+            print(f"[WARN] خطا در ارسال عکس به کانال: {e}")
+            print("[INFO] تلاش دوباره بدون عکس...")
+            return send_to_channel(text, photo_url=None)
+
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": CHANNEL_USERNAME,
+        "text": text,
+        "parse_mode": "HTML",
+    }
     try:
         resp = requests.post(url, data=payload, timeout=15, proxies=PROXIES)
         if not resp.ok:
             print(f"[WARN] تلگرام خطا داد: HTTP {resp.status_code} - {resp.text[:500]}")
-            if photo_url:
-                print("[INFO] تلاش دوباره بدون عکس...")
-                return send_to_channel(text, photo_url=None)
             return False
         result = resp.json()
         return result.get("ok", False)
     except Exception as e:
         print(f"[WARN] خطا در ارسال به کانال: {e}")
-        # اگر ارسال عکس شکست خورد (مثلا لینک عکس نامعتبر)، به‌صورت متن ساده امتحان کن
-        if photo_url:
-            print("[INFO] تلاش دوباره بدون عکس...")
-            return send_to_channel(text, photo_url=None)
         return False
 
 
