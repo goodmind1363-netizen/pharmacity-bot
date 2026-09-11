@@ -22,7 +22,7 @@ SOURCE_CHANNELS = [
 CHECK_INTERVAL_SECONDS = int(os.environ.get("CHECK_INTERVAL_SECONDS", "900"))  # 15 دقیقه
 # ساعت:دقیقه‌های چک WHO در روز (به وقت UTC)، جدا شده با کاما — پیش‌فرض ۳ بار در روز
 WHO_CHECK_TIMES = [
-    t.strip() for t in os.environ.get("WHO_CHECK_TIMES", "05:30,11:00,16:20").split(",") if t.strip()
+    t.strip() for t in os.environ.get("WHO_CHECK_TIMES", "05:30,11:00,16:20,19:30").split(",") if t.strip()
 ]
 WHO_NEWS_URL = "https://www.who.int/news"
 
@@ -245,10 +245,13 @@ def send_to_channel(text, photo_url=None):
 
     try:
         resp = requests.post(url, data=payload, timeout=15, proxies=PROXIES)
-        resp.raise_for_status()
+        if not resp.ok:
+            print(f"[WARN] تلگرام خطا داد: HTTP {resp.status_code} - {resp.text[:500]}")
+            if photo_url:
+                print("[INFO] تلاش دوباره بدون عکس...")
+                return send_to_channel(text, photo_url=None)
+            return False
         result = resp.json()
-        if not result.get("ok"):
-            print(f"[WARN] تلگرام خطا داد: {result}")
         return result.get("ok", False)
     except Exception as e:
         print(f"[WARN] خطا در ارسال به کانال: {e}")
@@ -280,7 +283,6 @@ def main_loop():
     seen = load_seen()
     last_who_check_key = None
     print(f"شروع به کار ربات. کانال‌های منبع: {SOURCE_CHANNELS}")
-    print_available_models()
 
     while True:
         new_seen = set(seen)
@@ -321,7 +323,7 @@ def main_loop():
         for t in WHO_CHECK_TIMES:
             th, tm = map(int, t.split(":"))
             target_minutes = th * 60 + tm
-            if abs(now_minutes - target_minutes) <= tolerance_minutes // 2:
+            if abs(now_minutes - target_minutes) <= tolerance_minutes:
                 matched_time = t
                 break
 
