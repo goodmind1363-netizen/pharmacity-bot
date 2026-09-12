@@ -3,6 +3,7 @@ import time
 import json
 import hashlib
 import threading
+import xml.etree.ElementTree as ET
 import requests
 from bs4 import BeautifulSoup
 from flask import Flask
@@ -24,7 +25,12 @@ CHECK_INTERVAL_SECONDS = int(os.environ.get("CHECK_INTERVAL_SECONDS", "900"))  #
 WHO_CHECK_TIMES = [
     t.strip() for t in os.environ.get("WHO_CHECK_TIMES", "04:30,07:00,11:30,15:30").split(",") if t.strip()
 ]
-WHO_NEWS_URL = "https://www.who.int/news"
+# منابع خبری انگلیسی معتبر پزشکی/دارویی (به‌جای WHO)
+ENGLISH_SOURCES = {
+    "STAT": os.environ.get("STAT_RSS_URL", "https://www.statnews.com/category/pharma/feed/"),
+    "FiercePharma": os.environ.get("FIERCEPHARMA_RSS_URL", "https://www.fiercepharma.com/rss/xml"),
+    "Endpoints": os.environ.get("ENDPOINTS_RSS_URL", "https://endpts.com/feed/"),
+}
 
 # اطلاعات JSONBin.io برای ذخیره‌سازی دائمی «خبرهای دیده‌شده»
 # (چون دیسک Render رایگان با هر ری‌استارت پاک می‌شود)
@@ -132,60 +138,91 @@ def fetch_channel_posts(channel_username, limit=5):
     return posts
 
 
-# ---------- گرفتن آخرین مطالب علمی از سایت WHO (۱ تا ۲ مطلب) ----------
-def fetch_who_latest(limit=2):
+# ---------- گرفتن آخرین مطالب از منابع خبری انگلیسی معتبر (از طریق RSS) ----------
+def fetch_rss_latest(source_name, feed_url, limit=1):
     try:
-        resp = requests.get(WHO_NEWS_URL, timeout=15, headers={
+        resp = requests.get(feed_url, timeout=15, headers={
             "User-Agent": "Mozilla/5.0"
-        })
+        }, proxies=PROXIES)
         resp.raise_for_status()
     except Exception as e:
-        print(f"[WARN] خطا در دریافت WHO: {e}")
+        print(f"[WARN] خطا در دریافت RSS از {source_name}: {e}")
         return []
 
-    soup = BeautifulSoup(resp.text, "html.parser")
-    # لینک‌های خبر در صفحه who.int/news معمولا داخل تگ‌های <a> با href شامل /news/item هستند
-    link_tags = soup.select("a[href*='/news/item']")[:limit]
     articles = []
+    try:
+        root = ET.fromstring(resp.content)
+        items = root.findall(".//item")[:limit]
+        for item in items:
+            title_el = item.find("title")
+            link_el = item.find("link")
+            desc_el = item.find("description")
 
-    for link_tag in link_tags:
-        href = link_tag.get("href", "")
-        title = link_tag.get_text(strip=True)
-        if not href or not title:
-            continue
-        full_url = href if href.startswith("http") else f"https://www.who.int{href}"
+            title = title_el.text.strip() if title_el is not None and title_el.text else ""
+            link = link_el.text.strip() if link_el is not None and link_el.text else ""
+            raw_desc = desc_el.text if desc_el is not None and desc_el.text else ""
+            # حذف تگ‌های HTML ساده از خلاصه RSS
+            desc = BeautifulSoup(raw_desc, "html.parser").get_text(separator=" ").strip()
 
-        photo_url = None
-        try:
-            article_resp = requests.get(full_url, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
-            article_resp.raise_for_status()
-            article_soup = BeautifulSoup(article_resp.text, "html.parser")
-            paragraphs = article_soup.select("p")
-            body = "\n".join(p.get_text(strip=True) for p in paragraphs[:6] if p.get_text(strip=True))
+            if not title or not link:
+                continue
 
-            og_image = article_soup.select_one("meta[property='og:image']")
-            if og_image and og_image.get("content"):
-                photo_url = og_image["content"]
-        except Exception as e:
-            print(f"[WARN] خطا در دریافت متن کامل خبر WHO: {e}")
-            body = ""
+            # پیدا کردن عکس (media:content یا enclosure رایج‌ترین‌ها هستند)
+            photo_url = None
+            media_ns = "{http://search.yahoo.com/mrss/}"
+            media_content = item.find(f"{media_ns}content")
+            if media_content is not None and media_content.get("url"):
+                photo_url = media_content.get("url")
+            if not photo_url:
+                enclosure = item.find("enclosure")
+                if enclosure is not None and enclosure.get("url"):
+                    photo_url = enclosure.get("url")
+            if not photo_url:
+                img_match = BeautifulSoup(raw_desc, "html.parser").find("img")
+                if img_match and img_match.get("src"):
+                    photo_url = img_match["src"]
 
-        articles.append({
-            "url": full_url,
-            "title": title,
-            "text": f"{title}\n\n{body}",
-            "photo_url": photo_url,
-        })
+            # اگر هنوز عکسی پیدا نشد، مستقیم به صفحه خبر برو و og:image را بردار
+            if not photo_url:
+                try:
+                    page_resp = requests.get(
+                        link, timeout=15, headers={"User-Agent": "Mozilla/5.0"}, proxies=PROXIES
+                    )
+                    page_resp.raise_for_status()
+                    page_soup = BeautifulSoup(page_resp.text, "html.parser")
+                    og_image = page_soup.select_one("meta[property='og:image']")
+                    if og_image and og_image.get("content"):
+                        photo_url = og_image["content"]
+                except Exception as e:
+                    print(f"[WARN] خطا در گرفتن عکس از صفحه خبر ({source_name}): {e}")
+
+            articles.append({
+                "url": link,
+                "title": title,
+                "text": f"{title}\n\n{desc}",
+                "photo_url": photo_url,
+                "source": source_name,
+            })
+    except Exception as e:
+        print(f"[WARN] خطا در تجزیه RSS از {source_name}: {e}")
 
     return articles
+
+
+def fetch_english_sources_latest(limit_per_source=1):
+    all_articles = []
+    for name, feed_url in ENGLISH_SOURCES.items():
+        all_articles.extend(fetch_rss_latest(name, feed_url, limit=limit_per_source))
+    return all_articles
 
 
 # ---------- بازنویسی خبر با هوش مصنوعی (از طریق API رسمی Google Gemini) ----------
 def rewrite_news(raw_text, is_scientific=False):
     style_note = (
-        "این یک مطلب علمی/پزشکی از سازمان جهانی بهداشت (WHO) است که به زبان انگلیسی است. "
+        "این یک خبر تخصصی داروسازی/بیوتکنولوژی از یک منبع معتبر بین‌المللی انگلیسی‌زبان "
+        "(مثل STAT، Fierce Pharma یا Endpoints News) است. "
         "آن را کامل و دقیق به فارسی روان ترجمه کن (نه فقط خلاصه‌برداری سطحی)، طوری که خواننده "
-        "فارسی‌زبان بدون نیاز به منبع اصلی، محتوای علمی را کامل و درست متوجه شود."
+        "فارسی‌زبان بدون نیاز به منبع اصلی، محتوای خبر را کامل و درست متوجه شود."
         if is_scientific else
         "این یک خبر داروسازی/سلامت است."
     )
@@ -347,24 +384,24 @@ def main_loop():
 
         check_key = f"{today_str}-{matched_time}"
         if matched_time and last_who_check_key != check_key:
-            who_articles = fetch_who_latest(limit=2)
-            for who_article in who_articles:
-                h = post_hash("who.int", who_article["text"])
+            english_articles = fetch_english_sources_latest(limit_per_source=1)
+            for article in english_articles:
+                h = post_hash(article["source"], article["text"])
                 if h in seen:
                     continue
-                print("[INFO] مطلب جدید WHO پیدا شد، در حال بازنویسی...")
-                rewritten = rewrite_news(who_article["text"], is_scientific=True)
+                print(f"[INFO] مطلب جدید از {article['source']} پیدا شد، در حال ترجمه و بازنویسی...")
+                rewritten = rewrite_news(article["text"], is_scientific=True)
                 if not rewritten:
                     continue
                 final_text = (
                     f"{rewritten}\n\n"
                     f"━━━━━━━━━━\n"
-                    f"🌍 منبع: {who_article['url']}\n"
+                    f"🌍 منبع: {article['url']}\n"
                     f"🔗 {CHANNEL_USERNAME if CHANNEL_USERNAME.startswith('@') else '@' + CHANNEL_USERNAME}"
                 )
-                ok = send_to_channel(final_text, photo_url=who_article.get("photo_url"))
+                ok = send_to_channel(final_text, photo_url=article.get("photo_url"))
                 if ok:
-                    print("[INFO] مطلب WHO با موفقیت پست شد.")
+                    print(f"[INFO] مطلب {article['source']} با موفقیت پست شد.")
                     new_seen.add(h)
                 time.sleep(3)
             last_who_check_key = check_key
