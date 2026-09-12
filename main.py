@@ -11,6 +11,7 @@ from flask import Flask
 # ---------- تنظیمات (از Environment Variables خوانده می‌شود) ----------
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 CHANNEL_USERNAME = os.environ.get("CHANNEL_USERNAME")  # مثلا: @Pharma_City_News
+CHANNEL_DISPLAY_NAME = os.environ.get("CHANNEL_DISPLAY_NAME", "شهر دارو")  # نام فارسی برای ذکر در متن خبر
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
 
@@ -212,7 +213,13 @@ def fetch_rss_latest(source_name, feed_url, limit=1):
 def fetch_english_sources_latest(limit_per_source=1):
     all_articles = []
     for name, feed_url in ENGLISH_SOURCES.items():
-        all_articles.extend(fetch_rss_latest(name, feed_url, limit=limit_per_source))
+        articles = fetch_rss_latest(name, feed_url, limit=limit_per_source)
+        if articles:
+            titles = [a["title"][:50] for a in articles]
+            print(f"[INFO] منبع {name} چک شد — {len(articles)} مطلب پیدا شد: {titles}")
+        else:
+            print(f"[INFO] منبع {name} چک شد — هیچ مطلبی برنگشت (احتمالا خطا یا فید خالی)")
+        all_articles.extend(articles)
     return all_articles
 
 
@@ -262,11 +269,10 @@ def rewrite_news(raw_text, is_scientific=False):
 
 # ---------- ارسال پیام به کانال خودمان (با عکس اختیاری) ----------
 def send_to_channel(text, photo_url=None):
-    caption_or_text = text if len(text) <= 1024 else text[:1021] + "..."
-
+    # کپشن عکس در تلگرام حداکثر 1024 کاراکتر مجاز است؛ پیام متنی معمولی تا 4096.
+    # اگر متن طولانی‌تر از حد کپشن باشد، عکس را جدا (بدون کپشن) و متن کامل را
+    # به‌صورت پیام دوم می‌فرستیم تا هیچ خبری بریده/ناقص نشود.
     if photo_url:
-        # عکس را خودمان دانلود می‌کنیم و مستقیم آپلود می‌کنیم، چون بعضی
-        # سایت‌ها اجازه دانلود مستقیم توسط سرور تلگرام را نمی‌دهند (Hotlink Protection)
         try:
             img_resp = requests.get(
                 photo_url, timeout=20,
@@ -279,12 +285,14 @@ def send_to_channel(text, photo_url=None):
             print(f"[WARN] خطا در دانلود عکس ({photo_url}): {e}")
             return send_to_channel(text, photo_url=None)
 
+        send_caption_with_photo = len(text) <= 1024
         url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto"
         data = {
             "chat_id": CHANNEL_USERNAME,
-            "caption": caption_or_text,
             "parse_mode": "HTML",
         }
+        if send_caption_with_photo:
+            data["caption"] = text
         files = {"photo": ("image.jpg", image_bytes)}
         try:
             resp = requests.post(url, data=data, files=files, timeout=30, proxies=PROXIES)
@@ -293,7 +301,12 @@ def send_to_channel(text, photo_url=None):
                 print("[INFO] تلاش دوباره بدون عکس...")
                 return send_to_channel(text, photo_url=None)
             result = resp.json()
-            return result.get("ok", False)
+            if not result.get("ok"):
+                return False
+            # اگر متن طولانی بود و به‌عنوان کپشن نرفت، حالا کامل آن را جدا بفرست
+            if not send_caption_with_photo:
+                return send_to_channel(text, photo_url=None)
+            return True
         except Exception as e:
             print(f"[WARN] خطا در ارسال عکس به کانال: {e}")
             print("[INFO] تلاش دوباره بدون عکس...")
@@ -394,6 +407,7 @@ def main_loop():
                 if not rewritten:
                     continue
                 final_text = (
+                    f"📰 به گزارش {CHANNEL_DISPLAY_NAME} و به نقل از {article['source']}:\n\n"
                     f"{rewritten}\n\n"
                     f"━━━━━━━━━━\n"
                     f"🌍 منبع: {article['url']}\n"
