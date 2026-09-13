@@ -24,13 +24,15 @@ SOURCE_CHANNELS = [
 CHECK_INTERVAL_SECONDS = int(os.environ.get("CHECK_INTERVAL_SECONDS", "900"))  # 15 دقیقه
 # ساعت:دقیقه‌های چک WHO در روز (به وقت UTC)، جدا شده با کاما — پیش‌فرض ۳ بار در روز
 WHO_CHECK_TIMES = [
-    t.strip() for t in os.environ.get("WHO_CHECK_TIMES", "04:30,07:00,11:30,15:30").split(",") if t.strip()
+    t.strip() for t in os.environ.get("WHO_CHECK_TIMES", "05:00,07:20,11:10,14:20,17:00").split(",") if t.strip()
 ]
-# منابع خبری انگلیسی معتبر پزشکی/دارویی (به‌جای WHO)
+# منابع خبری انگلیسی معتبر پزشکی/دارویی
 ENGLISH_SOURCES = {
     "STAT": os.environ.get("STAT_RSS_URL", "https://www.statnews.com/category/pharma/feed/"),
-    "FiercePharma": os.environ.get("FIERCEPHARMA_RSS_URL", "https://www.fiercepharma.com/rss/xml"),
     "Endpoints": os.environ.get("ENDPOINTS_RSS_URL", "https://endpts.com/feed/"),
+    "NatureMedicine": os.environ.get("NATURE_MEDICINE_RSS_URL", "https://www.nature.com/nm.rss"),
+    "NatureBiotechnology": os.environ.get("NATURE_BIOTECHNOLOGY_RSS_URL", "https://www.nature.com/nbt.rss"),
+    "PharmaTimes": os.environ.get("PHARMATIMES_RSS_URL", "https://www.pharmatimes.com/rss/news_rss.rss"),
 }
 
 # اطلاعات JSONBin.io برای ذخیره‌سازی دائمی «خبرهای دیده‌شده»
@@ -151,10 +153,47 @@ def fetch_rss_latest(source_name, feed_url, limit=1):
             "Accept-Language": "en-US,en;q=0.9",
         }, proxies=PROXIES)
         resp.raise_for_status()
+        return parse_rss_xml(source_name, resp.content, limit)
     except Exception as e:
-        print(f"[WARN] خطا در دریافت RSS از {source_name}: {e}")
+        print(f"[WARN] خطا در دریافت مستقیم RSS از {source_name}: {e} — تلاش با سرویس واسط...")
+        return fetch_rss_via_proxy(source_name, feed_url, limit)
+
+
+def fetch_rss_via_proxy(source_name, feed_url, limit=1):
+    # بعضی سایت‌ها درخواست مستقیم را مسدود می‌کنند (۴۰۳)؛ از rss2json.com که
+    # خودش فید را می‌گیرد و به JSON ساده تبدیل می‌کند استفاده می‌کنیم
+    try:
+        proxy_url = f"https://api.rss2json.com/v1/api.json?rss_url={feed_url}&count={limit}"
+        resp = requests.get(proxy_url, timeout=20, proxies=PROXIES)
+        resp.raise_for_status()
+        data = resp.json()
+        if data.get("status") != "ok":
+            print(f"[WARN] سرویس واسط هم نتوانست RSS {source_name} را بگیرد: {data}")
+            return []
+
+        articles = []
+        for item in data.get("items", [])[:limit]:
+            title = (item.get("title") or "").strip()
+            link = (item.get("link") or "").strip()
+            raw_desc = item.get("description") or ""
+            desc = BeautifulSoup(raw_desc, "html.parser").get_text(separator=" ").strip()
+            if not title or not link:
+                continue
+            photo_url = item.get("enclosure", {}).get("link") or item.get("thumbnail") or None
+            articles.append({
+                "url": link,
+                "title": title,
+                "text": f"{title}\n\n{desc}",
+                "photo_url": photo_url,
+                "source": source_name,
+            })
+        return articles
+    except Exception as e:
+        print(f"[WARN] خطا در سرویس واسط RSS برای {source_name}: {e}")
         return []
 
+
+def parse_rss_xml(source_name, content, limit=1):
     articles = []
     try:
         root = ET.fromstring(resp.content)
