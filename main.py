@@ -196,7 +196,7 @@ def fetch_rss_via_proxy(source_name, feed_url, limit=1):
 def parse_rss_xml(source_name, content, limit=1):
     articles = []
     try:
-        root = ET.fromstring(resp.content)
+        root = ET.fromstring(content)
         items = root.findall(".//item")[:limit]
         for item in items:
             title_el = item.find("title")
