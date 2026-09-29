@@ -2,7 +2,6 @@ import os
 import time
 import json
 import hashlib
-import threading
 import xml.etree.ElementTree as ET
 import requests
 from bs4 import BeautifulSoup
@@ -11,9 +10,10 @@ from flask import Flask
 # ---------- تنظیمات (از Environment Variables خوانده می‌شود) ----------
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 CHANNEL_USERNAME = os.environ.get("CHANNEL_USERNAME")  # مثلا: @Pharma_City_News
-CHANNEL_DISPLAY_NAME = os.environ.get("CHANNEL_DISPLAY_NAME", "شهر دارو")  # نام فارسی برای ذکر در متن خبر
+CHANNEL_DISPLAY_NAME = os.environ.get("CHANNEL_DISPLAY_NAME", "شهر دارو")
+
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
 
 SOURCE_CHANNELS = [
     c.strip() for c in os.environ.get(
@@ -22,10 +22,12 @@ SOURCE_CHANNELS = [
 ]
 
 CHECK_INTERVAL_SECONDS = int(os.environ.get("CHECK_INTERVAL_SECONDS", "900"))  # 15 دقیقه
-# ساعت:دقیقه‌های چک WHO در روز (به وقت UTC)، جدا شده با کاما — پیش‌فرض ۳ بار در روز
+
+# ساعت:دقیقه‌های چک منابع انگلیسی در روز (به وقت UTC)
 WHO_CHECK_TIMES = [
     t.strip() for t in os.environ.get("WHO_CHECK_TIMES", "05:00,07:20,11:10,14:20,17:00").split(",") if t.strip()
 ]
+
 # منابع خبری انگلیسی معتبر پزشکی/دارویی
 ENGLISH_SOURCES = {
     "STAT": os.environ.get("STAT_RSS_URL", "https://www.statnews.com/category/pharma/feed/"),
@@ -36,18 +38,21 @@ ENGLISH_SOURCES = {
 }
 
 # اطلاعات JSONBin.io برای ذخیره‌سازی دائمی «خبرهای دیده‌شده»
-# (چون دیسک Render رایگان با هر ری‌استارت پاک می‌شود)
 JSONBIN_API_KEY = os.environ.get("JSONBIN_API_KEY", "")
 JSONBIN_BIN_ID = os.environ.get("JSONBIN_BIN_ID", "")
 
-# اگر سرور داخل ایران است و به فیلترشکن نیاز دارد، آدرس پراکسی محلی را
-# اینجا تنظیم کنید (مثلا یک سرویس V2Ray/Xray که روی خود سرور اجرا می‌شود)
-PROXY_URL = os.environ.get("PROXY_URL", "")  # مثال: socks5h://127.0.0.1:1080
+# اگر سرور نیاز به فیلترشکن دارد، آدرس پراکسی محلی را اینجا تنظیم کنید
+PROXY_URL = os.environ.get("PROXY_URL", "")
 PROXIES = {"http": PROXY_URL, "https": PROXY_URL} if PROXY_URL else None
 
+# امضای پایانی که به همه پست‌ها اضافه می‌شود
+SIGNATURE_LINE = "📌 شهر دارو، منبع اطلاع‌رسانی دنیای دارو"
+
+SEEN_FILE = "seen_posts.json"
+
+
 # ---------- کمکی: خواندن/نوشتن پیام‌های قبلاً دیده‌شده (جلوگیری از تکرار) ----------
-# این‌ها را روی JSONBin.io (سرویس رایگان ذخیره‌سازی JSON) نگه می‌داریم تا با
-# ری‌استارت یا دیپلوی جدید Render پاک نشوند.
+# این‌ها را روی JSONBin.io نگه می‌داریم تا با ری‌استارت یا دیپلوی جدید Render پاک نشوند.
 def load_seen():
     if not JSONBIN_API_KEY or not JSONBIN_BIN_ID:
         print("[WARN] JSONBIN تنظیم نشده — حافظه ضدتکرار موقتی و ناپایدار خواهد بود.")
@@ -70,7 +75,6 @@ def save_seen(seen):
     if not JSONBIN_API_KEY or not JSONBIN_BIN_ID:
         return
     try:
-        # فقط 500 مورد آخر را نگه می‌داریم تا حجم داده بیش از حد بزرگ نشود
         trimmed = list(seen)[-500:]
         resp = requests.put(
             f"https://api.jsonbin.io/v3/b/{JSONBIN_BIN_ID}",
@@ -86,24 +90,10 @@ def save_seen(seen):
         print(f"[WARN] خطا در ذخیره حافظه ضدتکرار در JSONBin: {e}")
 
 
-
-
-def post_hash(channel, text):
-    raw = f"{channel}:{text[:200]}"
+def post_hash(source, text):
+    raw = f"{source}:{text[:200]}"
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
-
-# ---------- گرفتن آخرین پیام‌های یک کانال از نسخه وب عمومی تلگرام ----------
-def fetch_channel_posts(channel_username, limit=5):
-    url = f"https://t.me/s/{channel_username}"
-    try:
-        resp = requests.get(url, timeout=15, headers={
-            "User-Agent": "Mozilla/5.0"
-        }, proxies=PROXIES)
-        resp.raise_for_status()
-    except Exception as e:
-        print(f"[WARN] خطا در دریافت کانال {channel_username}: {e}")
-        return []
 
 # ---------- گرفتن آخرین پیام‌های یک کانال از نسخه وب عمومی تلگرام (متن + عکس) ----------
 def fetch_channel_posts(channel_username, limit=5):
@@ -124,7 +114,7 @@ def fetch_channel_posts(channel_username, limit=5):
         text_div = block.select_one("div.tgme_widget_message_text")
         text = text_div.get_text(separator="\n").strip() if text_div else ""
         if not text:
-            continue  # پیام‌های بدون متن (فقط عکس بدون توضیح) را رد می‌کنیم
+            continue
 
         photo_url = None
         photo_div = block.select_one("a.tgme_widget_message_photo_wrap")
@@ -160,8 +150,6 @@ def fetch_rss_latest(source_name, feed_url, limit=1):
 
 
 def fetch_rss_via_proxy(source_name, feed_url, limit=1):
-    # بعضی سایت‌ها درخواست مستقیم را مسدود می‌کنند (۴۰۳)؛ از rss2json.com که
-    # خودش فید را می‌گیرد و به JSON ساده تبدیل می‌کند استفاده می‌کنیم
     try:
         proxy_url = f"https://api.rss2json.com/v1/api.json?rss_url={feed_url}&count={limit}"
         resp = requests.get(proxy_url, timeout=20, proxies=PROXIES)
@@ -206,13 +194,11 @@ def parse_rss_xml(source_name, content, limit=1):
             title = title_el.text.strip() if title_el is not None and title_el.text else ""
             link = link_el.text.strip() if link_el is not None and link_el.text else ""
             raw_desc = desc_el.text if desc_el is not None and desc_el.text else ""
-            # حذف تگ‌های HTML ساده از خلاصه RSS
             desc = BeautifulSoup(raw_desc, "html.parser").get_text(separator=" ").strip()
 
             if not title or not link:
                 continue
 
-            # پیدا کردن عکس (media:content یا enclosure رایج‌ترین‌ها هستند)
             photo_url = None
             media_ns = "{http://search.yahoo.com/mrss/}"
             media_content = item.find(f"{media_ns}content")
@@ -271,7 +257,7 @@ def fetch_english_sources_latest(limit_per_source=1):
 def rewrite_news(raw_text, is_scientific=False):
     style_note = (
         "این یک خبر تخصصی داروسازی/بیوتکنولوژی از یک منبع معتبر بین‌المللی انگلیسی‌زبان "
-        "(مثل STAT، Fierce Pharma یا Endpoints News) است. "
+        "(مثل STAT، Nature Medicine، Nature Biotechnology، Endpoints یا PharmaTimes) است. "
         "آن را کامل و دقیق به فارسی روان ترجمه کن (نه فقط خلاصه‌برداری سطحی)، طوری که خواننده "
         "فارسی‌زبان بدون نیاز به منبع اصلی، محتوای خبر را کامل و درست متوجه شود."
         if is_scientific else
@@ -283,8 +269,7 @@ def rewrite_news(raw_text, is_scientific=False):
         "1) یک تیتر کوتاه و جذاب در خط اول، با یک ایموجی مناسب موضوع در ابتدای تیتر\n"
         "2) یک خط خالی\n"
         "3) بدنه خبر در ۲ تا ۴ پاراگراف کوتاه، بدون تکرار، خلاصه اما کامل\n"
-        "4) یک خط خالی\n"
-        "5) یک جمع‌بندی/نتیجه‌گیری کوتاه با پیشوند «🔎 نتیجه‌گیری:»\n"
+        "نیازی به جمع‌بندی یا نتیجه‌گیری در پایان نیست — فقط تیتر و بدنه خبر کافی است.\n"
         "نکته مهم: هیچ نام کانال، یوزرنیم (مثل @something)، لینک تلگرام، یا عبارت "
         "«Forwarded from» یا مشابه آن را از متن اصلی در خروجی نیاور — فقط خودِ محتوای خبر را بازنویسی کن.\n"
         "فقط خروجی نهایی را بنویس، بدون هیچ مقدمه یا توضیح اضافه:\n\n" + raw_text
@@ -313,9 +298,6 @@ def rewrite_news(raw_text, is_scientific=False):
 
 # ---------- ارسال پیام به کانال خودمان (با عکس اختیاری) ----------
 def send_to_channel(text, photo_url=None):
-    # کپشن عکس در تلگرام حداکثر 1024 کاراکتر مجاز است؛ پیام متنی معمولی تا 4096.
-    # اگر متن طولانی‌تر از حد کپشن باشد، عکس را جدا (بدون کپشن) و متن کامل را
-    # به‌صورت پیام دوم می‌فرستیم تا هیچ خبری بریده/ناقص نشود.
     if photo_url:
         try:
             img_resp = requests.get(
@@ -347,7 +329,6 @@ def send_to_channel(text, photo_url=None):
             result = resp.json()
             if not result.get("ok"):
                 return False
-            # اگر متن طولانی بود و به‌عنوان کپشن نرفت، حالا کامل آن را جدا بفرست
             if not send_caption_with_photo:
                 return send_to_channel(text, photo_url=None)
             return True
@@ -374,22 +355,6 @@ def send_to_channel(text, photo_url=None):
         return False
 
 
-# ---------- بررسی مدل‌های مجاز برای این کلید (فقط برای عیب‌یابی) ----------
-def print_available_models():
-    try:
-        resp = requests.get(
-            f"https://generativelanguage.googleapis.com/v1beta/models?key={GEMINI_API_KEY}",
-            timeout=15,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        names = [m.get("name", "") for m in data.get("models", [])
-                 if "generateContent" in m.get("supportedGenerationMethods", [])]
-        print(f"[INFO] مدل‌های مجاز برای این کلید: {names}")
-    except Exception as e:
-        print(f"[WARN] خطا در گرفتن لیست مدل‌ها: {e}")
-
-
 # ---------- حلقه اصلی ----------
 def main_loop():
     seen = load_seen()
@@ -399,7 +364,7 @@ def main_loop():
     while True:
         new_seen = set(seen)
 
-        # ۱) چک کانال‌های تلگرام (هر بار)
+        # ۱) چک کانال‌های تلگرام فارسی (هر بار، هر ۱۵ دقیقه)
         for channel in SOURCE_CHANNELS:
             posts = fetch_channel_posts(channel)
             for post in posts:
@@ -417,15 +382,16 @@ def main_loop():
                 final_text = (
                     f"{rewritten}\n\n"
                     f"━━━━━━━━━━\n"
+                    f"{SIGNATURE_LINE}\n"
                     f"🔗 {CHANNEL_USERNAME if CHANNEL_USERNAME.startswith('@') else '@' + CHANNEL_USERNAME}"
                 )
                 ok = send_to_channel(final_text, photo_url=photo_url)
                 if ok:
-                    print(f"[INFO] خبر با موفقیت در کانال پست شد.")
+                    print("[INFO] خبر با موفقیت در کانال پست شد.")
                     new_seen.add(h)
                 time.sleep(3)
 
-        # ۲) چک WHO (چند بار در روز، در ساعت:دقیقه‌های مشخص‌شده، با کمی انعطاف)
+        # ۲) چک منابع انگلیسی (چند بار در روز، در ساعت‌های مشخص‌شده)
         now = time.gmtime()
         today_str = time.strftime("%Y-%m-%d", now)
         now_minutes = now.tm_hour * 60 + now.tm_min
@@ -455,6 +421,7 @@ def main_loop():
                     f"{rewritten}\n\n"
                     f"━━━━━━━━━━\n"
                     f"🌍 منبع: {article['url']}\n"
+                    f"{SIGNATURE_LINE}\n"
                     f"🔗 {CHANNEL_USERNAME if CHANNEL_USERNAME.startswith('@') else '@' + CHANNEL_USERNAME}"
                 )
                 ok = send_to_channel(final_text, photo_url=article.get("photo_url"))
@@ -490,7 +457,7 @@ if __name__ == "__main__":
     if missing:
         print(f"[ERROR] این متغیرها تنظیم نشده‌اند: {missing}")
     else:
-        # حلقه اصلی ربات را در یک ترد جدا اجرا می‌کنیم تا وب‌سرور هم‌زمان کار کند
+        import threading
         bot_thread = threading.Thread(target=main_loop, daemon=True)
         bot_thread.start()
 
