@@ -4,12 +4,13 @@ import json
 import hashlib
 import re
 import threading
+from pathlib import Path
 from datetime import datetime, timezone
 import xml.etree.ElementTree as ET
 import requests
 from bs4 import BeautifulSoup
 from flask import Flask
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageFont
 from io import BytesIO
 
 # ---------- تنظیمات (از Environment Variables خوانده می‌شود) ----------
@@ -371,33 +372,69 @@ def rewrite_news(raw_text, is_scientific=False):
 
 
 # ---------- ساخت تصویر برندشده برای همه خبرها ----------
-def make_branded_image(image_bytes=None):
-    """یک قاب ثابت و قابل تشخیص برای همه خبرهای کانال می‌سازد."""
+def extract_headline(text):
+    """استخراج تیتر از متن خبر برای کارت خبری بدون عکس."""
+    plain = re.sub(r"<[^>]+>", "", text or "")
+    lines = [re.sub(r"^\s*[📰🦴📌]+\s*", "", x).strip() for x in plain.splitlines() if x.strip()]
+    return lines[0] if lines else "خبر جدید حوزه دارو و سلامت"
+
+
+def make_branded_image(image_bytes=None, headline=None):
+    """ساخت قاب ثابت Pharma City News؛ در صورت نبود عکس، کارت خبری با تیتر می‌سازد."""
     try:
+        canvas = Image.new("RGB", (BRAND_IMAGE_WIDTH, BRAND_IMAGE_HEIGHT), (245, 250, 250))
+
         if image_bytes:
             src = Image.open(BytesIO(image_bytes)).convert("RGB")
-            # قاب 16:9؛ تصویر خبر داخل قاب قرار می‌گیرد.
             src.thumbnail((1140, 615), Image.Resampling.LANCZOS)
-            canvas = Image.new("RGB", (BRAND_IMAGE_WIDTH, BRAND_IMAGE_HEIGHT), "white")
             x = (BRAND_IMAGE_WIDTH - src.width) // 2
             y = 30 + (615 - src.height) // 2
             canvas.paste(src, (x, y))
         else:
-            canvas = Image.new("RGB", (BRAND_IMAGE_WIDTH, BRAND_IMAGE_HEIGHT), (245, 250, 250))
+            # کارت خبری بدون عکس: پس‌زمینه حرفه‌ای و تیتر خبر
+            draw_bg = ImageDraw.Draw(canvas)
+            draw_bg.rectangle((40, 45, BRAND_IMAGE_WIDTH-40, BRAND_IMAGE_HEIGHT-95), fill=(232, 241, 242))
+            draw_bg.rectangle((40, 45, BRAND_IMAGE_WIDTH-40, 155), fill=(8, 55, 110))
+
+            title = (headline or "خبر جدید حوزه دارو و سلامت").strip()
+            title = re.sub(r"^\s*📰\s*", "", title)
+            if len(title) > 150:
+                title = title[:147].rstrip() + "..."
+
+            font_paths = [
+                "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+                "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            ]
+            font_path = next((x for x in font_paths if Path(x).exists()), None)
+            try:
+                title_font = ImageFont.truetype(font_path, 46) if font_path else ImageFont.load_default()
+                small_font = ImageFont.truetype(font_path, 30) if font_path else ImageFont.load_default()
+            except Exception:
+                title_font = ImageFont.load_default()
+                small_font = title_font
+
+            # PIL با RAQM در صورت موجود بودن، متن فارسی را راست‌چین/شکل‌دهی می‌کند.
+            try:
+                draw_bg.text((BRAND_IMAGE_WIDTH//2, 100), "خبر دارویی و سلامت", fill="white",
+                             font=small_font, anchor="mm", direction="rtl", language="fa")
+                draw_bg.multiline_text((BRAND_IMAGE_WIDTH//2, 270), title, fill=(8, 55, 110),
+                                       font=title_font, anchor="mm", align="center", spacing=14,
+                                       direction="rtl", language="fa", stroke_width=0)
+            except Exception:
+                draw_bg.multiline_text((BRAND_IMAGE_WIDTH//2, 270), title, fill=(8, 55, 110),
+                                       font=title_font, anchor="mm", align="center", spacing=14)
 
         draw = ImageDraw.Draw(canvas)
-        # قاب اصلی سرمه‌ای + نوار سبز برند
         draw.rectangle((0, 0, BRAND_IMAGE_WIDTH-1, BRAND_IMAGE_HEIGHT-1), outline=(8, 55, 110), width=18)
         draw.rectangle((18, 18, BRAND_IMAGE_WIDTH-19, BRAND_IMAGE_HEIGHT-19), outline=(39, 180, 125), width=7)
-
-        # نوار پایین با نام انگلیسی برند
         draw.rectangle((18, BRAND_IMAGE_HEIGHT-58, BRAND_IMAGE_WIDTH-19, BRAND_IMAGE_HEIGHT-19), fill=(8, 55, 110))
         try:
-            draw.text((BRAND_IMAGE_WIDTH//2, BRAND_IMAGE_HEIGHT-39), "PHARMA CITY NEWS", fill="white", anchor="mm")
+            footer_font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 25)
         except Exception:
-            pass
+            footer_font = ImageFont.load_default()
+        draw.text((BRAND_IMAGE_WIDTH//2, BRAND_IMAGE_HEIGHT-39), "PHARMA CITY NEWS", fill="white",
+                  font=footer_font, anchor="mm")
 
-        # لوگوی کانال در گوشه بالا-چپ
         logo_path = Path(BRAND_LOGO_PATH)
         if logo_path.exists():
             logo = Image.open(logo_path).convert("RGB")
@@ -406,7 +443,6 @@ def make_branded_image(image_bytes=None):
             lx = (165 - logo.width)//2
             ly = (165 - logo.height)//2
             badge.paste(logo, (lx, ly))
-            # قاب ظریف دور لوگو
             badge_draw = ImageDraw.Draw(badge)
             badge_draw.rectangle((1,1,163,163), outline=(39,180,125), width=4)
             canvas.paste(badge, (38, 38))
@@ -439,7 +475,7 @@ def send_to_channel(text, photo_url=None):
                 chunks.append(chunk)
             image_bytes = b"".join(chunks)
             img_resp.close()
-            image_bytes = make_branded_image(image_bytes)
+            image_bytes = make_branded_image(image_bytes, headline=extract_headline(text))
         except Exception as e:
             print(f"[WARN] خطا در دانلود عکس ({photo_url}): {e}")
             return send_to_channel(text, photo_url=None)
@@ -460,12 +496,9 @@ def send_to_channel(text, photo_url=None):
                 print("[INFO] تلاش دوباره بدون عکس...")
                 return send_to_channel(text, photo_url=None)
             result = resp.json()
-            print(f"[TELEGRAM] sendPhoto HTTP={resp.status_code} ok={result.get('ok')} message_id={result.get('result', {}).get('message_id') if isinstance(result.get('result'), dict) else None} chat_id={result.get('result', {}).get('chat', {}).get('id') if isinstance(result.get('result'), dict) else None} caption_with_photo={send_caption_with_photo}")
             if not result.get("ok"):
-                print(f"[TELEGRAM] sendPhoto ERROR={result.get('description')}")
                 return False
             if not send_caption_with_photo:
-                print("[TELEGRAM] caption was over 1024 chars; sending text as a separate message.")
                 return send_to_channel(text, photo_url=None)
             return True
         except Exception as e:
@@ -485,9 +518,6 @@ def send_to_channel(text, photo_url=None):
             print(f"[WARN] تلگرام خطا داد: HTTP {resp.status_code} - {resp.text[:500]}")
             return False
         result = resp.json()
-        print(f"[TELEGRAM] sendMessage HTTP={resp.status_code} ok={result.get('ok')} message_id={result.get('result', {}).get('message_id') if isinstance(result.get('result'), dict) else None} chat_id={result.get('result', {}).get('chat', {}).get('id') if isinstance(result.get('result'), dict) else None}")
-        if not result.get("ok"):
-            print(f"[TELEGRAM] sendMessage ERROR={result.get('description')}")
         return result.get("ok", False)
     except Exception as e:
         print(f"[WARN] خطا در ارسال به کانال: {e}")
@@ -546,7 +576,6 @@ def main_loop():
     last_who_check_key = None
     last_physio_check_key = None
     print(f"شروع به کار ربات. کانال‌های منبع: {SOURCE_CHANNELS}")
-    print(f"[TELEGRAM] destination CHANNEL_USERNAME={CHANNEL_USERNAME}")
     print(f"[INFO] زمان‌بندی فیزیوتراپی (UTC): {PHYSIO_CHECK_TIMES}")
 
     while True:
