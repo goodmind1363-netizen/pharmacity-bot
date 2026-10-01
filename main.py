@@ -460,9 +460,12 @@ def send_to_channel(text, photo_url=None):
                 print("[INFO] تلاش دوباره بدون عکس...")
                 return send_to_channel(text, photo_url=None)
             result = resp.json()
+            print(f"[TELEGRAM] sendPhoto HTTP={resp.status_code} ok={result.get('ok')} message_id={result.get('result', {}).get('message_id') if isinstance(result.get('result'), dict) else None} chat_id={result.get('result', {}).get('chat', {}).get('id') if isinstance(result.get('result'), dict) else None} caption_with_photo={send_caption_with_photo}")
             if not result.get("ok"):
+                print(f"[TELEGRAM] sendPhoto ERROR={result.get('description')}")
                 return False
             if not send_caption_with_photo:
+                print("[TELEGRAM] caption was over 1024 chars; sending text as a separate message.")
                 return send_to_channel(text, photo_url=None)
             return True
         except Exception as e:
@@ -482,6 +485,9 @@ def send_to_channel(text, photo_url=None):
             print(f"[WARN] تلگرام خطا داد: HTTP {resp.status_code} - {resp.text[:500]}")
             return False
         result = resp.json()
+        print(f"[TELEGRAM] sendMessage HTTP={resp.status_code} ok={result.get('ok')} message_id={result.get('result', {}).get('message_id') if isinstance(result.get('result'), dict) else None} chat_id={result.get('result', {}).get('chat', {}).get('id') if isinstance(result.get('result'), dict) else None}")
+        if not result.get("ok"):
+            print(f"[TELEGRAM] sendMessage ERROR={result.get('description')}")
         return result.get("ok", False)
     except Exception as e:
         print(f"[WARN] خطا در ارسال به کانال: {e}")
@@ -540,6 +546,7 @@ def main_loop():
     last_who_check_key = None
     last_physio_check_key = None
     print(f"شروع به کار ربات. کانال‌های منبع: {SOURCE_CHANNELS}")
+    print(f"[TELEGRAM] destination CHANNEL_USERNAME={CHANNEL_USERNAME}")
     print(f"[INFO] زمان‌بندی فیزیوتراپی (UTC): {PHYSIO_CHECK_TIMES}")
 
     while True:
