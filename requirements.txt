@@ -1,0 +1,4 @@
+requests
+beautifulsoup4
+flask
+Pillow>=10.0.0
