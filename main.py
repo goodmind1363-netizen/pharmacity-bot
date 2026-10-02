@@ -173,7 +173,7 @@ def fetch_channel_posts(channel_username, limit=MAX_POSTS_PER_CHECK):
 
 
 # ---------- گرفتن آخرین مطالب از منابع خبری انگلیسی معتبر (از طریق RSS) ----------
-def fetch_rss_latest(source_name, feed_url, limit=1):
+def fetch_rss_latest(source_name, feed_url, limit=5):
     try:
         resp = requests.get(feed_url, timeout=15, headers={
             "User-Agent": (
@@ -190,7 +190,7 @@ def fetch_rss_latest(source_name, feed_url, limit=1):
         return fetch_rss_via_proxy(source_name, feed_url, limit)
 
 
-def fetch_rss_via_proxy(source_name, feed_url, limit=1):
+def fetch_rss_via_proxy(source_name, feed_url, limit=5):
     try:
         proxy_url = f"https://api.rss2json.com/v1/api.json?rss_url={feed_url}&count={limit}"
         resp = requests.get(proxy_url, timeout=20, proxies=PROXIES)
@@ -222,7 +222,7 @@ def fetch_rss_via_proxy(source_name, feed_url, limit=1):
         return []
 
 
-def parse_rss_xml(source_name, content, limit=1):
+def parse_rss_xml(source_name, content, limit=5):
     articles = []
     try:
         root = ET.fromstring(content)
@@ -281,7 +281,7 @@ def parse_rss_xml(source_name, content, limit=1):
     return articles
 
 
-def fetch_english_sources_latest(limit_per_source=1):
+def fetch_english_sources_latest(limit_per_source=5):
     all_articles = []
     for name, feed_url in ENGLISH_SOURCES.items():
         articles = fetch_rss_latest(name, feed_url, limit=limit_per_source)
@@ -457,6 +457,9 @@ def make_branded_image(image_bytes=None, headline=None):
 
 # ---------- ارسال پیام به کانال خودمان (با عکس اختیاری) ----------
 def send_to_channel(text, photo_url=None):
+    """ارسال همه خبرها با تصویر برندشده؛ اگر عکس منبع در دسترس نباشد، کارت خبری ساخته می‌شود."""
+    image_bytes = None
+
     if photo_url:
         try:
             img_resp = requests.get(
@@ -473,39 +476,49 @@ def send_to_channel(text, photo_url=None):
                 if total > MAX_IMAGE_BYTES:
                     raise ValueError(f"عکس بیش از حد مجاز بزرگ است ({total} بایت)")
                 chunks.append(chunk)
-            image_bytes = b"".join(chunks)
             img_resp.close()
-            image_bytes = make_branded_image(image_bytes, headline=extract_headline(text))
+            raw_image = b"".join(chunks)
+            image_bytes = make_branded_image(raw_image, headline=extract_headline(text))
         except Exception as e:
-            print(f"[WARN] خطا در دانلود عکس ({photo_url}): {e}")
-            return send_to_channel(text, photo_url=None)
+            print(f"[WARN] خطا در دانلود/پردازش عکس منبع ({photo_url}): {e}")
+            print("[INFO] عکس منبع در دسترس نیست؛ کارت خبری برندشده ساخته می‌شود.")
 
-        send_caption_with_photo = len(text) <= 1024
-        url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto"
-        data = {
-            "chat_id": CHANNEL_USERNAME,
-            "parse_mode": "HTML",
-        }
-        if send_caption_with_photo:
-            data["caption"] = text
-        files = {"photo": ("image.jpg", image_bytes)}
-        try:
-            resp = requests.post(url, data=data, files=files, timeout=30, proxies=PROXIES)
-            if not resp.ok:
-                print(f"[WARN] تلگرام خطا داد: HTTP {resp.status_code} - {resp.text[:500]}")
-                print("[INFO] تلاش دوباره بدون عکس...")
-                return send_to_channel(text, photo_url=None)
-            result = resp.json()
-            if not result.get("ok"):
-                return False
-            if not send_caption_with_photo:
-                return send_to_channel(text, photo_url=None)
-            return True
-        except Exception as e:
-            print(f"[WARN] خطا در ارسال عکس به کانال: {e}")
-            print("[INFO] تلاش دوباره بدون عکس...")
-            return send_to_channel(text, photo_url=None)
+    # حتی بدون عکس منبع، برای همه خبرها یک تصویر برندشده ارسال می‌کنیم.
+    if image_bytes is None:
+        image_bytes = make_branded_image(None, headline=extract_headline(text))
 
+    send_caption_with_photo = len(text) <= 1024
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto"
+    data = {
+        "chat_id": CHANNEL_USERNAME,
+        "parse_mode": "HTML",
+    }
+    if send_caption_with_photo:
+        data["caption"] = text
+
+    files = {"photo": ("pharmacity_news.jpg", image_bytes)}
+    try:
+        resp = requests.post(url, data=data, files=files, timeout=30, proxies=PROXIES)
+        if not resp.ok:
+            print(f"[WARN] تلگرام sendPhoto خطا داد: HTTP {resp.status_code} - {resp.text[:500]}")
+            print("[INFO] تلاش نهایی با sendMessage بدون عکس...")
+            return send_to_channel_text_only(text)
+
+        result = resp.json()
+        if not result.get("ok"):
+            print(f"[WARN] تلگرام sendPhoto ناموفق بود: {result.get('description', 'unknown error')}")
+            return send_to_channel_text_only(text)
+
+        if not send_caption_with_photo:
+            return send_to_channel_text_only(text)
+        return True
+    except Exception as e:
+        print(f"[WARN] خطا در ارسال تصویر به تلگرام: {e}")
+        print("[INFO] تلاش نهایی با sendMessage بدون عکس...")
+        return send_to_channel_text_only(text)
+
+
+def send_to_channel_text_only(text):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     payload = {
         "chat_id": CHANNEL_USERNAME,
@@ -515,57 +528,13 @@ def send_to_channel(text, photo_url=None):
     try:
         resp = requests.post(url, data=payload, timeout=15, proxies=PROXIES)
         if not resp.ok:
-            print(f"[WARN] تلگرام خطا داد: HTTP {resp.status_code} - {resp.text[:500]}")
+            print(f"[WARN] تلگرام sendMessage خطا داد: HTTP {resp.status_code} - {resp.text[:500]}")
             return False
         result = resp.json()
         return result.get("ok", False)
     except Exception as e:
-        print(f"[WARN] خطا در ارسال به کانال: {e}")
+        print(f"[WARN] خطا در ارسال متن به کانال: {e}")
         return False
-
-
-def fetch_physiotherapy_sources_latest(limit_per_source=1):
-    all_articles = []
-    for name, feed_url in PHYSIO_RSS_SOURCES.items():
-        articles = fetch_rss_latest(name, feed_url, limit=limit_per_source)
-        if articles:
-            titles = [a["title"][:60] for a in articles]
-            print(f"[PHYSIO] منبع {name} چک شد — {len(articles)} مطلب: {titles}")
-        else:
-            print(f"[PHYSIO] منبع {name} چک شد — مطلبی دریافت نشد")
-        all_articles.extend(articles)
-    return all_articles
-
-
-def publish_physiotherapy_articles(seen):
-    new_seen = set(seen)
-    articles = fetch_physiotherapy_sources_latest(limit_per_source=1)
-    for article in articles:
-        h = post_hash("physio:" + article["source"], article["text"])
-        if h in seen:
-            continue
-
-        print(f"[PHYSIO] مطلب جدید از {article['source']}، در حال بازنویسی...")
-        rewritten = rewrite_news(article["text"], is_scientific=True)
-        if not rewritten:
-            continue
-
-        final_text = (
-            f"🦴 <b>#فیزیوتراپی_جهان</b>\n\n"
-            f"{rewritten}\n\n"
-            f"━━━━━━━━━━\n"
-            f"🔬 منبع علمی: {article['source']}\n"
-            f"🔗 {article['url']}\n"
-            f"{generate_smart_hashtags(article['text'], is_physio=True)}\n"
-            f"{SIGNATURE_LINE}\n"
-            f"🔗 {CHANNEL_USERNAME if CHANNEL_USERNAME.startswith('@') else '@' + CHANNEL_USERNAME}"
-        )
-        ok = send_to_channel(final_text, photo_url=article.get("photo_url"))
-        if ok:
-            print(f"[PHYSIO] مطلب {article['source']} با موفقیت پست شد.")
-            new_seen.add(h)
-        time.sleep(3)
-    return new_seen
 
 
 # ---------- حلقه اصلی ----------
@@ -666,15 +635,21 @@ def run_one_cycle(seen, last_who_check_key, last_physio_check_key=None):
 
         check_key = f"{today_str}-{matched_time}"
         if matched_time and last_who_check_key != check_key:
-            english_articles = fetch_english_sources_latest(limit_per_source=1)
+            english_articles = fetch_english_sources_latest(limit_per_source=5)
+            published_count = 0
             for article in english_articles:
                 h = post_hash(article["source"], article["text"])
                 if h in seen:
+                    print(f"[INFO] [{article['source']}] قبلاً ارسال شده: {article['title'][:90]}")
                     continue
-                print(f"[INFO] مطلب جدید از {article['source']} پیدا شد، در حال ترجمه و بازنویسی...")
+
+                print(f"[INFO] [{article['source']}] خبر جدید: {article['title'][:90]}")
+                print(f"[INFO] [{article['source']}] در حال ترجمه و بازنویسی...")
                 rewritten = rewrite_news(article["text"], is_scientific=True)
                 if not rewritten:
+                    print(f"[WARN] [{article['source']}] بازنویسی ناموفق بود؛ خبر فعلاً seen نمی‌شود.")
                     continue
+
                 final_text = (
                     f"📰 به گزارش {CHANNEL_DISPLAY_NAME} و به نقل از {article['source']}:\n\n"
                     f"{rewritten}\n\n"
@@ -686,9 +661,17 @@ def run_one_cycle(seen, last_who_check_key, last_physio_check_key=None):
                 )
                 ok = send_to_channel(final_text, photo_url=article.get("photo_url"))
                 if ok:
-                    print(f"[INFO] مطلب {article['source']} با موفقیت پست شد.")
+                    print(f"[INFO] [{article['source']}] مطلب با موفقیت پست شد.")
                     new_seen.add(h)
+                    published_count += 1
+                else:
+                    print(f"[WARN] [{article['source']}] ارسال ناموفق بود؛ خبر seen نمی‌شود تا در نوبت بعد دوباره تلاش شود.")
+                if published_count >= MAX_POSTS_PER_CHECK:
+                    print(f"[INFO] سقف {MAX_POSTS_PER_CHECK} پست در این چرخه تکمیل شد.")
+                    break
                 time.sleep(3)
+
+            print(f"[INFO] پایان بررسی منابع انگلیسی: {len(english_articles)} مطلب بررسی شد، {published_count} مطلب منتشر شد.")
             last_who_check_key = check_key
 
         save_seen(new_seen)
